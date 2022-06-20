@@ -123,7 +123,7 @@ func ping(framer *http2.Framer) {
 					t1 := pings[0]
 					pings = pings[1:]
 					mx.Unlock()
-					log.Printf("  RECV PING = %q %s %f Mbps %f MB %f sec\n",
+					log.Printf("  RECV - PING = %q %s %f Mbps %f MB %f sec\n",
 						f.Data, time.Since(t1),
 						8*float64(total)/time.Since(start).Seconds()/1000/1000,
 						float64(total)/1000/1000,
@@ -149,7 +149,7 @@ func ping(framer *http2.Framer) {
 					mx.Unlock()
 				}(f.StreamID, f.Length)
 			case *http2.SettingsFrame:
-				log.Println("  RECV SETTINGS = ", f.String())
+				log.Println("  RECV - SETTINGS = ", f.String())
 				f.ForeachSetting(func(s http2.Setting) error { log.Println("  - ", s); return nil })
 				if !f.IsAck() {
 					log.Println("SEND - SETTINGS(ack) ...")
@@ -171,8 +171,10 @@ func ping(framer *http2.Framer) {
 				})
 				dec.Write(b)
 				rtx.Must(dec.Close(), "closed decoder")
+			case *http2.RSTStreamFrame:
+				log.Println("  RECV - RST = ", f.String(), f.ErrCode)
 			default:
-				log.Printf("RECV - %T %s", f, f)
+				log.Printf("  RECV - %T %s", f, f)
 				log.Println()
 			}
 		}
