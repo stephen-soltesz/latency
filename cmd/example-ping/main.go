@@ -19,6 +19,7 @@ import (
 var (
 	host = flag.String("host", "", "hostname of target http2 server")
 	addr = flag.String("addr", "443", "port number to connect to")
+	path = flag.String("path", "/large", "resource on target server to GET")
 )
 
 var (
@@ -84,7 +85,7 @@ func request(framer *http2.Framer) {
 	enc := hpack.NewEncoder(&buf)
 	enc.WriteField(hpack.HeaderField{Name: ":method", Value: "GET"})
 	enc.WriteField(hpack.HeaderField{Name: ":scheme", Value: "https"})
-	enc.WriteField(hpack.HeaderField{Name: ":path", Value: "/large"})
+	enc.WriteField(hpack.HeaderField{Name: ":path", Value: *path})
 	block := buf.Bytes()
 
 	p := http2.HeadersFrameParam{
@@ -106,38 +107,49 @@ func request(framer *http2.Framer) {
 
 func ping(framer *http2.Framer) {
 	total := 0
-	t1 := time.Now()
+	// t1 := time.Now()
 	start := time.Now()
 	once := sync.Once{}
+	pings := []time.Time{}
+	mx := sync.Mutex{}
 	go func() {
 		for {
 			f, err := framer.ReadFrame()
 			rtx.Must(err, "failed to read frame")
 			switch f := f.(type) {
 			case *http2.PingFrame:
-				log.Printf("  RECV PING = %q %s %f Mbps %f MB %f sec\n",
-					f.Data, time.Since(t1),
-					8*float64(total)/time.Since(start).Seconds()/1000/1000,
-					float64(total)/1000/1000,
-					time.Since(start).Seconds())
+				if f.IsAck() {
+					mx.Lock()
+					t1 := pings[0]
+					pings = pings[1:]
+					mx.Unlock()
+					log.Printf("  RECV PING = %q %s %f Mbps %f MB %f sec\n",
+						f.Data, time.Since(t1),
+						8*float64(total)/time.Since(start).Seconds()/1000/1000,
+						float64(total)/1000/1000,
+						time.Since(start).Seconds())
+				}
 			case *http2.DataFrame:
 				total += int(f.Length)
-				// fmt.Println("  DATA = ", time.Since(t1), f.Length, f.Type, "stream:", f.StreamID, f.StreamEnded(), f.FrameHeader.String(), total)
+				// fmt.Println("  DATA = ", f.Length, f.Type, "stream:", f.StreamID, f.StreamEnded(), f.FrameHeader.String(), total)
 				if f.StreamEnded() {
 					break
 				}
-				// fmt.Println(string(f.Data()))
-				// TODO: why are both necessary?
-				err = framer.WriteWindowUpdate(0, f.Length)
-				if err != nil {
-					log.Println("  - window update:", err)
-				}
-				err = framer.WriteWindowUpdate(f.StreamID, f.Length)
-				if err != nil {
-					log.Println("  - window update:", err)
-				}
+				go func(stream, length uint32) {
+					mx.Lock()
+					// TODO: why are both necessary?
+					err = framer.WriteWindowUpdate(0, length)
+					if err != nil {
+						log.Println("  - window update:", err)
+					}
+					err = framer.WriteWindowUpdate(stream, length)
+					if err != nil {
+						log.Println("  - window update:", err)
+					}
+					mx.Unlock()
+				}(f.StreamID, f.Length)
 			case *http2.SettingsFrame:
-				log.Println("  RECV SETTINGS = ", time.Since(t1), f.String())
+				log.Println("  RECV SETTINGS = ", f.String())
 				f.ForeachSetting(func(s http2.Setting) error { log.Println("  - ", s); return nil })
 				if !f.IsAck() {
 					log.Println("SEND - SETTINGS(ack) ...")
@@ -171,10 +183,15 @@ func ping(framer *http2.Framer) {
 
 	var err error
 	for {
-		time.Sleep(1 * time.Second)
-		t1 = time.Now()
+		time.Sleep(100 * time.Millisecond)
+		mx.Lock()
+		pings = append(pings, time.Now())
 		err = framer.WritePing(false, msg)
-		rtx.Must(err, "failed to write ping")
+		mx.Unlock()
+		if err != nil {
+			//	rtx.Must(err, "failed to write ping")
+			fmt.Println("failed to write ping:", err)
+		}
 	}
 }
 
